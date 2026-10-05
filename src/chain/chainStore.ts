@@ -8,6 +8,12 @@ import {
   createChainMatcher,
   type ChainPlan,
 } from './chainCore';
+import {
+  reviewChainWindow,
+  type ChainReviewEvidence,
+  type ChainReviewOutcome,
+  type ChainReviewRequest,
+} from './chainReview';
 
 /**
  * 三段拼接链 · 三槽位状态存储（框架无关，React 通过 subscribe 观察）。
@@ -74,10 +80,36 @@ export interface ChainNoSolution {
 
 export type ChainResult = ChainSolution | ChainNoSolution;
 
+/**
+ * 跨接缝窗口一次性复核的已绑定证据。
+ *
+ * 复核证据必须与产生它的拼接方案（进而与三槽版本身份）同生共死：
+ * - evidence 为复核核心给出的结果（值、计数、定位位置与全部来源）；
+ * - versions/taskId 记录证据成立时的三槽版本与拼接任务身份；
+ * - 槽位替换、匹配失败或方案切换（afterSlotChange）立即清空本字段，
+ *   界面绝不可能拿新合成序列配旧证据位置。
+ */
+export interface ChainBoundReview {
+  /** 产生该证据时的三槽版本身份 */
+  readonly versionA: number;
+  readonly versionB: number;
+  readonly versionC: number;
+  /** 产生该证据的拼接任务序号 */
+  readonly taskId: number;
+  /** 复核证据（窗口、值、计数、合成位置与来源槽位/原始下标） */
+  readonly evidence: ChainReviewEvidence;
+}
+
 export interface ChainStoreState {
   slots: Record<ChainSlotKey, ChainSlotState>;
   phase: ChainPhase;
   result: ChainResult | null;
+  /**
+   * 当前拼接方案上的一次性窗口复核证据；仅在 phase 为 chained
+   * 且复核成功后存在。任何槽位变动（替换/失败/取消）或方案切换
+   * 都会随 result 一起撤销，绝不可能跨方案残留。
+   */
+  review: ChainBoundReview | null;
   /** 各槽位版本号：每次槽位变动单调递增，链式任务以此绑定身份 */
   versions: Record<ChainSlotKey, number>;
   /** 已启动的链式任务总数（含被作废的），用于观察替换是否作废旧任务 */
@@ -115,6 +147,17 @@ export class ChainStore {
     C: { status: 'empty' },
   };
   private result: ChainResult | null = null;
+  /**
+   * 当前 chained 结论对应的方案与三份读数，供一次性窗口复核直接重放；
+   * 与 result 同生命周期：afterSlotChange 一并清空，复核只可能重放
+   * 「产生当前结论的」方案，杜绝新序列配旧位置。
+   */
+  private planContext: {
+    plan: ChainPlan;
+    slots: readonly [number[], number[], number[]];
+    taskId: number;
+  } | null = null;
+  private review: ChainBoundReview | null = null;
   private versions: Record<ChainSlotKey, number> = { A: 0, B: 0, C: 0 };
   private taskSeq = 0;
   private activeToken: ChainTaskToken | null = null;
@@ -172,6 +215,50 @@ export class ChainStore {
     this.bumpVersion(key);
     this.slots[key] = { status: 'empty' };
     this.afterSlotChange();
+  }
+
+  /**
+   * 跨接缝窗口一次性复核：在**当前 chained 结论所绑定的方案**上，
+   * 以合成序列半开坐标执行一次精确次序统计复核。
+   *
+   * - 仅当当前结论存在且其方案上下文仍在时才重放；planContext 与 result
+   *   同生命周期（任何槽位变动都在 afterSlotChange 一并清空），因此它的
+   *   存在本身就是「证据属于当前方案」的保证；方案被替换/失败/切换后
+   *   直接返回 error，不触碰任何状态；
+   * - 非法窗口返回 error 且**不改变**既有证据（质检员可修正参数后再试）；
+   * - 合成长度超出原查询索引承载上限时返回 unavailable：只禁用复核，
+   *   合法拼接结论保留；
+   * - 成功才把证据连同当前三槽版本与 taskId 一起原子替换进状态；
+   *   旧证据即便仍在屏幕上，也只可能属于当前方案，方案一变即被清空。
+   */
+  reviewWindow(req: ChainReviewRequest): ChainReviewOutcome {
+    const ctx = this.planContext;
+    if (ctx === null || this.result === null || this.result.kind !== 'solution') {
+      return {
+        kind: 'error',
+        errors: ['当前没有成立的拼接方案：请先在三份文件上重新裁定，再执行窗口复核'],
+      };
+    }
+
+    const outcome = reviewChainWindow(ctx.slots, ctx.plan, req);
+    if (outcome.kind === 'evidence') {
+      this.review = {
+        versionA: this.versions.A,
+        versionB: this.versions.B,
+        versionC: this.versions.C,
+        taskId: ctx.taskId,
+        evidence: outcome,
+      };
+      this.publish();
+    }
+    return outcome;
+  }
+
+  /** 主动清空复核证据（不影响拼接结论）；方案切换时证据也会被自动撤销 */
+  clearReview(): void {
+    if (this.review === null) return;
+    this.review = null;
+    this.publish();
   }
 
   /**
@@ -245,6 +332,10 @@ export class ChainStore {
   private afterSlotChange(): void {
     this.activeToken = null; // 旧任务在下一调度点发现身份失效后自行终止
     this.result = null;
+    // 复核证据绑定产生它的方案：槽位替换/失败/取消或方案切换立即撤销，
+    // 不能拿新合成序列配旧证据位置
+    this.planContext = null;
+    this.review = null;
     const a = this.slots.A;
     const b = this.slots.B;
     const c = this.slots.C;
@@ -299,6 +390,7 @@ export class ChainStore {
       this.activeToken = null;
       const timingMs = now() - startedAt;
       if (plan === null) {
+        this.planContext = null;
         this.result = {
           kind: 'none',
           fileNames: [ready[0].fileName, ready[1].fileName, ready[2].fileName],
@@ -322,6 +414,8 @@ export class ChainStore {
           tail: chainTailPreview(readings, plan, CONTEXT_MAX),
           timingMs,
         };
+        // 绑定产生当前结论的方案：一次性窗口复核只能在这一身份下重放
+        this.planContext = { plan, slots: readings, taskId: token.taskId };
       }
       this.publish();
     };
@@ -354,6 +448,7 @@ export class ChainStore {
       slots: { ...this.slots },
       phase: this.derivePhase(),
       result: this.result,
+      review: this.review,
       versions: { ...this.versions },
       taskSeq: this.taskSeq,
     };

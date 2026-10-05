@@ -2,16 +2,19 @@
  * Wavelet Matrix：针对固定 16 位无符号值域（0..65535）构建。
  *
  * 复杂度（n = readings.length，BITS = 16）：
- * - 构建：O(BITS * n) 时间，O(BITS * n) 分层序列与位前缀和空间
+ * 构建：O(BITS * n) 时间，O(BITS * n) 的分层序列与位前缀和空间
  *   （基础索引约 16*(n+1)*4 字节）；仅当 withSums 为真时再建每层
  *   值前缀和与零段值前缀和（满规模约多 48 MiB）
  * - 区间第 k 小：每查询 O(BITS)，与窗口长度无关
+ * - 区间计数（严格小于某值）：与第 k 小同形态的逐层下降 O(BITS)
  * - 区间「中位绝对偏差总量」（需 withSums）：与第 k 小同形态的逐层下降
  *   O(BITS)，不复制窗口、不为窗口另行排序
  *
  * 因此 20 万读数 + 10 万查询的总工作量约为 16*(20万 + 10万) 次常数级操作，
  * 远快于逐窗口复制排序。
  */
+import { VALUE_MAX } from './types';
+
 export const BITS = 16;
 
 /** 构造选项：withSums 为真时才额外建立偏差总量所需的值前缀和 */
@@ -132,6 +135,43 @@ export class WaveletMatrix {
       this.sumPref = sumPref;
       this.zeroSumPref = zeroSumPref;
     }
+  }
+
+  /**
+   * 半开区间 [start, end) 内严格小于 value 的读数数量，与第 k 小同形态的
+   * 逐层下降 O(BITS)：每层按 value 在该位的位值决定「该层即被确定为更小」
+   * 的整段（壹段或零段，计数由位前缀和 O(1) 给出），再沿与 value 同段
+   * 继续下降。value 允许 0..65536（65536 表示大于全部 16 位合法值）：
+   * 窗口内数量恰为 rank(65536)−rank(0)，无需为窗口复制排序。
+   * 调用方负责保证 0≤start≤end≤n。
+   */
+  countLess(start: number, end: number, value: number): number {
+    if (value <= 0) return 0;
+    if (value > VALUE_MAX) return end - start;
+    let l = start;
+    let r = end;
+    let count = 0;
+
+    for (let level = 0; level < BITS; level++) {
+      const b = BITS - 1 - level;
+      const p = this.pref[level];
+      const onesL = p[l];
+      const onesR = p[r];
+      const zerosInRange = r - l - (onesR - onesL);
+
+      if (((value >>> b) & 1) === 0) {
+        // value 本位为 0：本位为 1 的元素严格更大，本位为 0 者到后续层再分大小
+        l -= onesL;
+        r -= onesR;
+      } else {
+        // value 本位为 1：本位为 0 的元素严格更小，整段计入；其余随 value 进壹段
+        count += zerosInRange;
+        l = this.zeroCount[level] + onesL;
+        r = this.zeroCount[level] + onesR;
+      }
+    }
+
+    return count;
   }
 
   /**

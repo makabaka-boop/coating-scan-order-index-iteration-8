@@ -503,3 +503,81 @@ button.ghost:hover {
   color: var(--ok);
   font-weight: 700;
 }
+
+/* ---- 三段拼接链 · 跨接缝窗口一次性复核 ---- */
+
+.chain-review {
+  margin-top: 18px;
+  padding-top: 14px;
+  border-top: 1px dashed var(--line);
+}
+
+.chain-review h3 {
+  margin: 0 0 6px;
+}
+
+.review-form {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 10px;
+  margin: 10px 0 6px;
+}
+
+.review-form label {
+  display: inline-flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.review-form input {
+  width: 110px;
+  padding: 6px 8px;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: inherit;
+  font: inherit;
+}
+
+.review-unavailable {
+  margin: 10px 0;
+  padding: 10px 12px;
+  border: 1px solid var(--muted);
+  border-radius: 8px;
+  color: var(--muted);
+}
+
+.review-error {
+  margin-top: 8px;
+  color: var(--err);
+}
+
+.review-evidence {
+  margin-top: 12px;
+  padding: 12px;
+  background: var(--panel-2);
+  border: 1px solid var(--ok);
+  border-radius: 8px;
+}
+
+.review-evidence h4 {
+  margin: 12px 0 6px;
+}
+
+.review-sources {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.review-sources li {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}

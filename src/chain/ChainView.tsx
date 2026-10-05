@@ -1,5 +1,6 @@
 import { useCallback, useRef, useState, useSyncExternalStore } from 'react';
 import { createTimeoutScheduler } from '../seam/seamStore';
+import { CHAIN_REVIEW_MERGED_MAX } from '../types';
 import {
   CHAIN_SLOT_KEYS,
   ChainStore,
@@ -7,7 +8,9 @@ import {
   type ChainSlotState,
   type ChainStoreState,
   type ChainResult,
+  type ChainSolution,
 } from './chainStore';
+import type { ChainReviewOutcome } from './chainReview';
 
 const SLOT_META: Array<{ key: ChainSlotKey; label: string; role: string }> = [
   { key: 'A', label: '槽位 A', role: '三份之一，次序待定' },
@@ -32,7 +35,18 @@ export function ChainView() {
 
   const pick = useCallback(
     (key: ChainSlotKey, file: File) => {
-      void store.loadFileIntoSlot(key, file.name, () => file.text(), { byteSize: file.size });
+      // 优先用 file.text()；旧环境（File.prototype.text 缺失）退回 FileReader
+      const readText =
+        typeof file.text === 'function'
+          ? () => file.text()
+          : () =>
+              new Promise<string>((resolve, reject) => {
+                const reader = new FileReader();
+                reader.onload = () => resolve(String(reader.result));
+                reader.onerror = () => reject(reader.error ?? new Error('读取失败'));
+                reader.readAsText(file);
+              });
+      void store.loadFileIntoSlot(key, file.name, readText, { byteSize: file.size });
     },
     [store],
   );
@@ -56,7 +70,7 @@ export function ChainView() {
 
       <PhaseBanner state={state} />
 
-      {state.result && <ChainResultPanel result={state.result} />}
+      {state.result && <ChainResultPanel result={state.result} store={store} state={state} />}
     </section>
   );
 }
@@ -165,7 +179,15 @@ function PhaseBanner({ state }: { state: ChainStoreState }) {
   );
 }
 
-function ChainResultPanel({ result }: { result: ChainResult }) {
+function ChainResultPanel({
+  result,
+  store,
+  state,
+}: {
+  result: ChainResult;
+  store: ChainStore;
+  state: ChainStoreState;
+}) {
   if (result.kind === 'none') {
     return (
       <section className="panel seam-result seam-none">
@@ -243,6 +265,183 @@ function ChainResultPanel({ result }: { result: ChainResult }) {
           </div>
         </div>
       </div>
+
+      <ChainReviewPanel solution={result} store={store} state={state} />
     </section>
+  );
+}
+
+/**
+ * 跨接缝窗口一次性复核面板。
+ *
+ * 证据只来自 store.state.review（store 在任何槽位变动/方案切换时即撤销），
+ * 因此面板绝不保留自己的旧证据副本：方案一变，提交时返回错误、已展示证据
+ * 也随重渲染消失。表单参数只是输入，不构成任何跨方案证据。
+ */
+function ChainReviewPanel({
+  solution,
+  store,
+  state,
+}: {
+  solution: ChainSolution;
+  store: ChainStore;
+  state: ChainStoreState;
+}) {
+  const [start, setStart] = useState('0');
+  const [end, setEnd] = useState(String(solution.mergedCount));
+  const [k, setK] = useState('1');
+  const [formError, setFormError] = useState<string[] | null>(null);
+
+  // 方案切换（order/文件/合成长度变化）后旧证据必然已被 store 撤销；
+  // 这里同步把表单重置到新合成序列的整卷窗口，避免参数残留误导。
+  const solutionKey = `${solution.order.join('')}|${solution.fileNames.join('|')}|${solution.mergedCount}`;
+  const lastKeyRef = useRef(solutionKey);
+  if (lastKeyRef.current !== solutionKey) {
+    lastKeyRef.current = solutionKey;
+    setStart('0');
+    setEnd(String(solution.mergedCount));
+    setK('1');
+    setFormError(null);
+  }
+
+  const unavailable = solution.mergedCount > CHAIN_REVIEW_MERGED_MAX;
+
+  const submit = useCallback(() => {
+    const outcome: ChainReviewOutcome = store.reviewWindow({
+      start: Number(start),
+      end: Number(end),
+      k: Number(k),
+    });
+    if (outcome.kind === 'error') {
+      setFormError([...outcome.errors]);
+    } else {
+      setFormError(null);
+    }
+  }, [store, start, end, k]);
+
+  const review = state.review;
+  const evidence = review?.evidence ?? null;
+
+  return (
+    <div className="chain-review">
+      <h3>跨接缝窗口一次性复核</h3>
+      <p className="hint">
+        按合成序列半开坐标 <code>[start, end)</code> 输入窗口与 k（1 起），复用单文件第 k
+        小的同一张 Wavelet Matrix 精确次序统计：返回第 k 小值、窗口内严格小于及等于它的数量，
+        并按「同值读数按合成位置升序」定位命中位置。接缝重叠读数只计一次；来源证据列出
+        覆盖该位置的全部槽位及各自原始下标（含第二道接缝跨过第一道时三份同证）。证据绑定
+        当前拼接方案——替换任一槽位、匹配失败或切换方案立即撤销。
+      </p>
+
+      {unavailable ? (
+        <p className="review-unavailable" role="status">
+          合成长度 {solution.mergedCount.toLocaleString('zh-CN')} 超出原查询索引承载上限{' '}
+          {CHAIN_REVIEW_MERGED_MAX.toLocaleString('zh-CN')}：仅禁用此一次性复核，
+          上方拼接结论与头尾预览仍然有效。
+        </p>
+      ) : (
+        <>
+          <form
+            className="review-form"
+            onSubmit={(e) => {
+              e.preventDefault();
+              submit();
+            }}
+          >
+            <label>
+              start
+              <input
+                type="number"
+                value={start}
+                min={0}
+                max={solution.mergedCount - 1}
+                onChange={(e) => setStart(e.target.value)}
+              />
+            </label>
+            <label>
+              end
+              <input
+                type="number"
+                value={end}
+                min={1}
+                max={solution.mergedCount}
+                onChange={(e) => setEnd(e.target.value)}
+              />
+            </label>
+            <label>
+              k
+              <input type="number" value={k} min={1} onChange={(e) => setK(e.target.value)} />
+            </label>
+            <button className="primary" type="submit">
+              执行窗口复核
+            </button>
+            {evidence && (
+              <button className="ghost" type="button" onClick={() => store.clearReview()}>
+                清除证据
+              </button>
+            )}
+          </form>
+          <p className="hint">
+            合成坐标范围 0..{solution.mergedCount.toLocaleString('zh-CN')}（半开右端可取{' '}
+            {solution.mergedCount.toLocaleString('zh-CN')}）。
+          </p>
+
+          {formError && (
+            <div className="review-error" role="alert">
+              <ul className="error-list">
+                {formError.map((msg, i) => (
+                  <li key={i}>{msg}</li>
+                ))}
+              </ul>
+            </div>
+          )}
+
+          {evidence && (
+            <div className="review-evidence" role="status">
+              <dl className="metrics">
+                <div>
+                  <dt>窗口 [start, end)</dt>
+                  <dd>
+                    [{evidence.start}, {evidence.end}) · 长 {evidence.windowLength.toLocaleString('zh-CN')} · k=
+                    {evidence.k}
+                  </dd>
+                </div>
+                <div>
+                  <dt>第 k 小值</dt>
+                  <dd>{evidence.value}</dd>
+                </div>
+                <div>
+                  <dt>窗口内严格小于</dt>
+                  <dd>{evidence.lessCount.toLocaleString('zh-CN')} 条</dd>
+                </div>
+                <div>
+                  <dt>窗口内等于</dt>
+                  <dd>{evidence.equalCount.toLocaleString('zh-CN')} 条</dd>
+                </div>
+                <div>
+                  <dt>命中合成位置</dt>
+                  <dd>{evidence.position.toLocaleString('zh-CN')}</dd>
+                </div>
+              </dl>
+              <h4>来源证据（覆盖该合成位置的全部槽位与原始下标，按槽位 A→B→C）</h4>
+              <ul className="review-sources">
+                {evidence.sources.map((src) => {
+                  const key = CHAIN_SLOT_KEYS[src.slotIndex];
+                  const orderPos = solution.order.indexOf(key);
+                  const fileName = solution.fileNames[orderPos];
+                  return (
+                    <li key={key}>
+                      <span className="chip hit">槽位 {key}</span>
+                      <span className="file-name">{fileName}</span>
+                      <span className="hint">原始下标 {src.originalIndex.toLocaleString('zh-CN')}</span>
+                    </li>
+                  );
+                })}
+              </ul>
+            </div>
+          )}
+        </>
+      )}
+    </div>
   );
 }
