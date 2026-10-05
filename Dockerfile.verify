@@ -1,0 +1,8 @@
+# 一次性验收服务：运行 Vitest（含直接排序预言机与 4 秒满规模验收），退出码即验收结论。
+# 用法：docker compose build verify && docker compose run --rm verify
+FROM node:20-alpine
+WORKDIR /app
+COPY package.json package-lock.json* ./
+RUN npm ci
+COPY . .
+CMD ["npm", "run", "test:run"]

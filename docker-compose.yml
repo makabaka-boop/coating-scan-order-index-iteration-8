@@ -1,0 +1,23 @@
+# 涂层线扫复核台 —— 静态页面发布 + 一次性验收服务
+#
+# 启动页面：  docker compose up web         （默认宿主端口 8080）
+# 自定义端口：WEB_PORT=9000 docker compose up web
+# 一次验收：  docker compose build verify && docker compose run --rm verify
+services:
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: coating-kth-web:latest
+    ports:
+      # WEB_PORT 可覆盖宿主端口；容器内固定监听 80
+      - "${WEB_PORT:-8080}:80"
+    restart: unless-stopped
+
+  verify:
+    build:
+      context: .
+      dockerfile: Dockerfile.verify
+    image: coating-kth-verify:latest
+    # 不映射端口、不常驻：运行测试套件后退出，exit 0 即验收通过
+    restart: "no"
