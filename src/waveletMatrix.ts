@@ -1,3 +1,5 @@
+import { VALUE_MAX } from './types';
+
 /**
  * Wavelet Matrix：针对固定 16 位无符号值域（0..65535）构建。
  *
@@ -166,6 +168,145 @@ export class WaveletMatrix {
     return answer;
   }
 
+  /**
+   * 半开区间 [start, end) 内严格小于 value 的元素数量。
+   * 调用方负责保证 0≤start≤end≤n；value 须为 0..65535 的 16 位整数。
+   * 逐层统计本位已更小、前缀位仍相等的元素，全程 O(BITS)。
+   */
+  countLess(start: number, end: number, value: number): number {
+    let l = start;
+    let r = end;
+    let count = 0;
+
+    for (let level = 0; level < BITS; level++) {
+      const b = BITS - 1 - level;
+      const p = this.pref[level];
+      const onesL = p[l];
+      const onesR = p[r];
+      const zerosInRange = r - l - (onesR - onesL);
+
+      if (((value >>> b) & 1) === 1) {
+        // 目标本位为 1：区间内本位为 0 的元素都严格小于目标
+        count += zerosInRange;
+        l = this.zeroCount[level] + onesL;
+        r = this.zeroCount[level] + onesR;
+      } else {
+        l -= onesL;
+        r -= onesR;
+      }
+    }
+
+    return count;
+  }
+
+  /** 半开区间 [start, end) 内等于 value 的元素数量（16 位值域下 O(BITS)） */
+  countEqual(start: number, end: number, value: number): number {
+    if (value <= 0) return this.countLess(start, end, 1);
+    if (value >= VALUE_MAX) return end - start - this.countLess(start, end, VALUE_MAX);
+    return this.countLess(start, end, value + 1) - this.countLess(start, end, value);
+  }
+
+  /**
+   * 半开区间 [start, end) 内第 k 小值及其合成位置。
+   * Wavelet Matrix 的稳定划分使最终并列值按原位置升序排列，因此返回的
+   * position 正是「同值读数按合成位置升序」时第 k 个被选中的位置。
+   */
+  kthPosition(start: number, end: number, k: number): { value: number; position: number } {
+    let l = start;
+    let r = end;
+    let answer = 0;
+    const enteredOne = new Array<boolean>(BITS);
+    const windowStartAtLevel = new Array<number>(BITS);
+    const windowEndAtLevel = new Array<number>(BITS);
+
+    for (let level = 0; level < BITS; level++) {
+      const b = BITS - 1 - level;
+      const p = this.pref[level];
+      const onesL = p[l];
+      const onesR = p[r];
+      const zerosInRange = r - l - (onesR - onesL);
+
+      windowStartAtLevel[level] = l;
+      windowEndAtLevel[level] = r;
+      if (k <= zerosInRange) {
+        enteredOne[level] = false;
+        l -= onesL;
+        r -= onesR;
+      } else {
+        enteredOne[level] = true;
+        answer |= 1 << b;
+        k -= zerosInRange;
+        l = this.zeroCount[level] + onesL;
+        r = this.zeroCount[level] + onesR;
+      }
+    }
+
+    // 下降过程只在进入壹段时扣除零段数量；最终 k−1 是同值值段内下标。
+    let idx = l + k - 1;
+    for (let level = BITS - 1; level >= 0; level--) {
+      const p = this.pref[level];
+      if (enteredOne[level]) {
+        idx = this.selectOne(
+          p,
+          idx - this.zeroCount[level],
+          windowStartAtLevel[level],
+          windowEndAtLevel[level],
+        );
+      } else {
+        idx = this.selectZero(
+          p,
+          idx,
+          windowStartAtLevel[level],
+          windowEndAtLevel[level],
+        );
+      }
+    }
+
+    return { value: answer, position: idx };
+  }
+
+  /**
+   * 在划分前的查询位置区间 [loBound, hiBound) 内，定位壹段全局下标对应的原位置。
+   * 二分前缀下标 x=position+1：找首个 rank1(x)>oneRank 的 x，返回 x−1。
+   */
+  private selectOne(
+    p: Int32Array,
+    oneRank: number,
+    loBound: number,
+    hiBound: number,
+  ): number {
+    let lo = loBound + 1;
+    let hi = hiBound;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (p[mid] > oneRank) {
+        hi = mid;
+      } else {
+        lo = mid + 1;
+      }
+    }
+    return lo - 1;
+  }
+
+  /** selectOne 的零位版本：找首个 rank0(x)>zeroRank 的前缀下标 x，返回 x−1 */
+  private selectZero(
+    p: Int32Array,
+    zeroRank: number,
+    loBound: number,
+    hiBound: number,
+  ): number {
+    let lo = loBound + 1;
+    let hi = hiBound;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (mid - p[mid] > zeroRank) {
+        hi = mid;
+      } else {
+        lo = mid + 1;
+      }
+    }
+    return lo - 1;
+  }
   /**
    * 半开区间 [start, end) 的较低中位数，及窗口内每条读数到该中位数的
    * 绝对差之和（中位绝对偏差总量）。必须以 withSums 构造。

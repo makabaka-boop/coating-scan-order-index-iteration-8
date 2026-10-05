@@ -285,6 +285,116 @@ describe('ChainStore：可控调度器交错，替换/取消/失败不回写旧�
   });
 });
 
+describe('ChainStore：一次性跨接缝窗口复核', () => {
+  function chainedStore(): { store: ChainStore; scheduler: ManualScheduler } {
+    const scheduler = new ManualScheduler();
+    const store = new ChainStore(scheduler);
+    store.readySlot('A', 'a.json', [9, 1, 2]);
+    store.readySlot('B', 'b.json', [2, 3]);
+    store.readySlot('C', 'c.json', [3, 8]);
+    scheduler.runAll();
+    expect(store.getState().phase).toBe('chained');
+    return { store, scheduler };
+  }
+
+  it('返回第 k 小、小于/等于数量及按合成位置升序定位的全部来源证据', () => {
+    const { store } = chainedStore();
+    store.reviewWindow({ start: 2, end: 4, k: 1 });
+    const state = store.getState();
+    expect(state.review).toMatchObject({
+      kind: 'review',
+      start: 2,
+      end: 4,
+      k: 1,
+      windowLength: 2,
+      kthValue: 2,
+      lessCount: 0,
+      equalCount: 1,
+      position: 2,
+    });
+    if (state.review?.kind === 'review') {
+      expect(state.review.sources).toEqual([
+        { slot: 0, originalIndex: 2, value: 2 },
+        { slot: 1, originalIndex: 0, value: 2 },
+      ]);
+    }
+    const result = state.result as ChainSolution;
+    expect(result.reviewEnabled).toBe(true);
+    expect(result.slotFileNames).toEqual(['a.json', 'b.json', 'c.json']);
+  });
+
+  it('非法查询保留旧拼接方案，只显示复核错误；成功复核替换旧复核', () => {
+    const { store } = chainedStore();
+    store.reviewWindow({ start: 2, end: 4, k: 1 });
+    store.reviewWindow({ start: 0, end: 5, k: 99 });
+    let state = store.getState();
+    expect(state.result).not.toBeNull();
+    expect(state.review?.kind).toBe('error');
+
+    store.reviewWindow({ start: 0, end: 5, k: 1 });
+    state = store.getState();
+    expect(state.review).toMatchObject({ kind: 'review', kthValue: 1, position: 1 });
+  });
+
+  it('替换任一槽立即撤销旧证据，不能拿新序列配旧位置', () => {
+    const { store, scheduler } = chainedStore();
+    store.reviewWindow({ start: 2, end: 4, k: 1 });
+    expect(store.getState().review).not.toBeNull();
+
+    store.readySlot('B', 'b2.json', [7, 7, 7]);
+    expect(store.getState().review).toBeNull();
+    scheduler.runAll();
+    expect(store.getState().review).toBeNull();
+  });
+
+  it('匹配失败或取消槽位也撤销旧复核证据', () => {
+    const storeA = chainedStore().store;
+    storeA.readySlot('B', 'bad-match.json', [4, 5]);
+    expect(storeA.getState().review).toBeNull();
+
+    const { store, scheduler } = chainedStore();
+    store.reviewWindow({ start: 0, end: 5, k: 1 });
+    store.clearSlot('A');
+    expect(store.getState().review).toBeNull();
+    scheduler.runAll();
+    expect(store.getState().review).toBeNull();
+  });
+
+  it('合成长度超过原查询索引上限时仅禁用复核，合法拼接仍成立', () => {
+    const scheduler = new ManualScheduler();
+    const store = new ChainStore(scheduler, 1 << 20);
+    const overlap = 4000;
+    const periodic = (length: number, base: number, span: number) =>
+      Array.from({ length }, (_, i) => base + (i % span));
+    const a = [
+      ...periodic(70000 - overlap, 0, 100),
+      ...periodic(overlap, 1000, 1000),
+    ];
+    const b = [
+      ...periodic(overlap, 1000, 1000),
+      ...periodic(70000 - overlap * 2, 3000, 1000),
+      ...periodic(overlap, 5000, 1000),
+    ];
+    const c = [
+      ...periodic(overlap, 5000, 1000),
+      ...periodic(70000 - overlap, 7000, 1000),
+    ];
+    store.readySlot('A', 'a.json', a);
+    store.readySlot('B', 'b.json', b);
+    store.readySlot('C', 'c.json', c);
+    scheduler.runAll();
+
+    const state = store.getState();
+    expect(state.phase).toBe('chained');
+    const result = state.result as ChainSolution;
+    expect(result.mergedCount).toBe(210000 - overlap * 2);
+    expect(result.reviewEnabled).toBe(false);
+    expect(result.reviewDisabledReason).toContain('200000');
+    store.reviewWindow({ start: 0, end: 1, k: 1 });
+    expect(store.getState().review).toBeNull();
+  });
+});
+
 describe('ChainStore：本地 JSON 入口（整文件契约验证，只取 readings）', () => {
   it('合法文件进入槽位并触发裁定；queries 为空也合法', async () => {
     const scheduler = new ManualScheduler();

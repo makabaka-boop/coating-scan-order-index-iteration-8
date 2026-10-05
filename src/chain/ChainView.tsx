@@ -1,5 +1,6 @@
 import { useCallback, useRef, useState, useSyncExternalStore } from 'react';
 import { createTimeoutScheduler } from '../seam/seamStore';
+import type { ChainReviewResult, ChainWindowQuery } from './chainReview';
 import {
   CHAIN_SLOT_KEYS,
   ChainStore,
@@ -56,7 +57,13 @@ export function ChainView() {
 
       <PhaseBanner state={state} />
 
-      {state.result && <ChainResultPanel result={state.result} />}
+      {state.result && (
+        <ChainResultPanel
+          result={state.result}
+          review={state.review}
+          onReview={(query) => store.reviewWindow(query)}
+        />
+      )}
     </section>
   );
 }
@@ -165,7 +172,15 @@ function PhaseBanner({ state }: { state: ChainStoreState }) {
   );
 }
 
-function ChainResultPanel({ result }: { result: ChainResult }) {
+function ChainResultPanel({
+  result,
+  review,
+  onReview,
+}: {
+  result: ChainResult;
+  review: ChainReviewResult | null;
+  onReview: (query: ChainWindowQuery) => void;
+}) {
   if (result.kind === 'none') {
     return (
       <section className="panel seam-result seam-none">
@@ -243,6 +258,148 @@ function ChainResultPanel({ result }: { result: ChainResult }) {
           </div>
         </div>
       </div>
+
+      <ChainReviewForm
+        key={`${result.order.join('-')}:${result.fileNames.join('|')}:${result.mergedCount}:${result.overlap1}:${result.overlap2}`}
+        result={result}
+        review={review}
+        onReview={onReview}
+      />
     </section>
+  );
+}
+
+function ChainReviewForm({
+  result,
+  review,
+  onReview,
+}: {
+  result: Extract<ChainResult, { kind: 'solution' }>;
+  review: ChainReviewResult | null;
+  onReview: (query: ChainWindowQuery) => void;
+}) {
+  const [start, setStart] = useState(0);
+  const [end, setEnd] = useState(Math.min(8, result.mergedCount));
+  const [k, setK] = useState(1);
+
+  if (!result.reviewEnabled) {
+    return (
+      <div className="chain-review chain-review-disabled">
+        <h4>跨接缝窗口第 k 小复核</h4>
+        <p className="hint">{result.reviewDisabledReason}；合法拼接方案与头尾预览仍然保留。</p>
+      </div>
+    );
+  }
+
+  const submit = (event: React.FormEvent) => {
+    event.preventDefault();
+    onReview({ start, end, k });
+  };
+
+  return (
+    <form className="chain-review" onSubmit={submit}>
+      <h4>跨接缝窗口第 k 小复核（半开坐标）</h4>
+      <p className="hint">
+        复核与当前方案绑定；替换任一槽位、匹配失败或切换方案会立即撤销旧证据。接缝重叠读数在统计中只计一次，证据列出全部来源槽位。
+      </p>
+      <div className="review-controls">
+        <label>
+          start
+          <input
+            type="number"
+            min={0}
+            max={result.mergedCount - 1}
+            value={Number.isFinite(start) ? start : ''}
+            onChange={(e) => setStart(Number(e.target.value))}
+          />
+        </label>
+        <label>
+          end
+          <input
+            type="number"
+            min={1}
+            max={result.mergedCount}
+            value={Number.isFinite(end) ? end : ''}
+            onChange={(e) => setEnd(Number(e.target.value))}
+          />
+        </label>
+        <label>
+          k
+          <input
+            type="number"
+            min={1}
+            max={Math.max(1, end - start)}
+            value={Number.isFinite(k) ? k : ''}
+            onChange={(e) => setK(Number(e.target.value))}
+          />
+        </label>
+        <button className="primary" type="submit">
+          复核此窗口
+        </button>
+      </div>
+
+      {review?.kind === 'error' && (
+        <ul className="error-list review-errors">
+          {review.errors.map((msg, i) => (
+            <li key={i}>{msg}</li>
+          ))}
+        </ul>
+      )}
+      {review?.kind === 'review' && <ChainReviewDetails result={result} review={review} />}
+    </form>
+  );
+}
+
+function ChainReviewDetails({
+  result,
+  review,
+}: {
+  result: Extract<ChainResult, { kind: 'solution' }>;
+  review: Extract<ChainReviewResult, { kind: 'review' }>;
+}) {
+  return (
+    <div className="review-result">
+      <dl className="metrics">
+        <div>
+          <dt>第 k 小值</dt>
+          <dd>{review.kthValue}</dd>
+        </div>
+        <div>
+          <dt>小于它</dt>
+          <dd>{review.lessCount.toLocaleString('zh-CN')}</dd>
+        </div>
+        <div>
+          <dt>等于它</dt>
+          <dd>{review.equalCount.toLocaleString('zh-CN')}</dd>
+        </div>
+        <div>
+          <dt>选中合成位置</dt>
+          <dd>{review.position}</dd>
+        </div>
+      </dl>
+      <p className="hint">
+        窗口 [{review.start}, {review.end})，长度 {review.windowLength}，k={review.k}；同值读数按合成位置升序定位。
+      </p>
+      <table className="source-table">
+        <thead>
+          <tr>
+            <th>槽位</th>
+            <th>原始文件</th>
+            <th>原始下标（从 0 开始）</th>
+            <th>读数</th>
+          </tr>
+        </thead>
+        <tbody>
+          {review.sources.map((source) => (
+            <tr key={`${source.slot}-${source.originalIndex}`}>
+              <td className="mono">{CHAIN_SLOT_KEYS[source.slot]}</td>
+              <td>{result.slotFileNames[source.slot]}</td>
+              <td className="mono">{source.originalIndex}</td>
+              <td className="mono">{source.value}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
   );
 }

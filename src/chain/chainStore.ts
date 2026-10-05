@@ -8,6 +8,7 @@ import {
   createChainMatcher,
   type ChainPlan,
 } from './chainCore';
+import { reviewChainWindow, type ChainReviewResult, type ChainWindowQuery } from './chainReview';
 
 /**
  * 三段拼接链 · 三槽位状态存储（框架无关，React 通过 subscribe 观察）。
@@ -49,6 +50,8 @@ export interface ChainSolution {
   order: [ChainSlotKey, ChainSlotKey, ChainSlotKey];
   /** 与 order 一一对应的文件名 */
   fileNames: [string, string, string];
+  /** 按槽位 A/B/C 排列的文件名，供来源证据定位 */
+  slotFileNames: [string, string, string];
   /** 与 order 一一对应的读数条数 */
   counts: [number, number, number];
   /** 接缝一：首份后缀 ≡ 次份前缀的重叠长度 */
@@ -57,6 +60,10 @@ export interface ChainSolution {
   overlap2: number;
   /** 合成长度 = 三份条数之和 − overlap1 − overlap2 */
   mergedCount: number;
+  /** 合成长度不超过原单文件查询索引上限时，允许做一次性窗口复核 */
+  reviewEnabled: boolean;
+  /** reviewEnabled 为 false 时给出只禁用复核、不废弃拼接的原因 */
+  reviewDisabledReason?: string;
   /** 合成序列开头至多 CONTEXT_MAX 条读数 */
   head: number[];
   /** 合成序列末尾至多 CONTEXT_MAX 条读数 */
@@ -78,6 +85,8 @@ export interface ChainStoreState {
   slots: Record<ChainSlotKey, ChainSlotState>;
   phase: ChainPhase;
   result: ChainResult | null;
+  /** 当前拼接方案上最近一次窗口复核；槽位变动、无方案或方案切换时立即撤销 */
+  review: ChainReviewResult | null;
   /** 各槽位版本号：每次槽位变动单调递增，链式任务以此绑定身份 */
   versions: Record<ChainSlotKey, number>;
   /** 已启动的链式任务总数（含被作废的），用于观察替换是否作废旧任务 */
@@ -115,6 +124,7 @@ export class ChainStore {
     C: { status: 'empty' },
   };
   private result: ChainResult | null = null;
+  private review: ChainReviewResult | null = null;
   private versions: Record<ChainSlotKey, number> = { A: 0, B: 0, C: 0 };
   private taskSeq = 0;
   private activeToken: ChainTaskToken | null = null;
@@ -172,6 +182,49 @@ export class ChainStore {
     this.bumpVersion(key);
     this.slots[key] = { status: 'empty' };
     this.afterSlotChange();
+  }
+
+  /**
+   * 在当前已成立的拼接方案上执行一次性窗口复核。证据与方案同步绑定：
+   * 槽位替换、匹配失败或方案切换都会先清空 review；若调用时状态已变化，
+   * 本次结果直接丢弃，避免新序列配上旧位置。非法查询坐标只返回错误，
+   * 不改变当前槽位与已成立方案。
+   */
+  reviewWindow(query: ChainWindowQuery): void {
+    const result = this.result;
+    if (result === null || result.kind !== 'solution') return;
+    if (
+      this.slots.A.status !== 'ready' ||
+      this.slots.B.status !== 'ready' ||
+      this.slots.C.status !== 'ready'
+    ) {
+      return;
+    }
+
+    const slotByKey = { A: this.slots.A, B: this.slots.B, C: this.slots.C };
+    const order = result.order.map((key) => CHAIN_SLOT_KEYS.indexOf(key)) as [
+      number,
+      number,
+      number,
+    ];
+    const slots: [ArrayLike<number>, ArrayLike<number>, ArrayLike<number>] = [
+      slotByKey.A.readings,
+      slotByKey.B.readings,
+      slotByKey.C.readings,
+    ];
+    const plan: ChainPlan = {
+      order,
+      overlap1: result.overlap1,
+      overlap2: result.overlap2,
+      mergedLength: result.mergedCount,
+    };
+
+    const outcome = reviewChainWindow({ slots, plan, query });
+    // 提交前再次核验：复核是同步计算，但仍保持与链式任务相同的状态绑定纪律
+    if (this.result !== result) return;
+    // 长度闸门已经在方案面板说明；不产生一次性证据
+    this.review = outcome.kind === 'disabled' ? null : outcome;
+    this.publish();
   }
 
   /**
@@ -245,6 +298,7 @@ export class ChainStore {
   private afterSlotChange(): void {
     this.activeToken = null; // 旧任务在下一调度点发现身份失效后自行终止
     this.result = null;
+    this.review = null;
     const a = this.slots.A;
     const b = this.slots.B;
     const c = this.slots.C;
@@ -314,10 +368,16 @@ export class ChainStore {
           kind: 'solution',
           order,
           fileNames: plan.order.map((i) => ready[i].fileName) as [string, string, string],
+          slotFileNames: [ready[0].fileName, ready[1].fileName, ready[2].fileName],
           counts: plan.order.map((i) => ready[i].readings.length) as [number, number, number],
           overlap1: plan.overlap1,
           overlap2: plan.overlap2,
           mergedCount: plan.mergedLength,
+          reviewEnabled: plan.mergedLength <= READINGS_MAX,
+          reviewDisabledReason:
+            plan.mergedLength > READINGS_MAX
+              ? `合成长度 ${plan.mergedLength} 超出原查询索引可承载上限 ${READINGS_MAX}，只禁用窗口复核`
+              : undefined,
           head: chainHeadPreview(readings, plan, CONTEXT_MAX),
           tail: chainTailPreview(readings, plan, CONTEXT_MAX),
           timingMs,
@@ -354,6 +414,7 @@ export class ChainStore {
       slots: { ...this.slots },
       phase: this.derivePhase(),
       result: this.result,
+      review: this.review,
       versions: { ...this.versions },
       taskSeq: this.taskSeq,
     };

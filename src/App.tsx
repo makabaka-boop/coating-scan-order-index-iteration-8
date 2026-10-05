@@ -34,7 +34,7 @@ const VIEW_META: Record<ViewKey, { nav: string; sub: React.ReactNode }> = {
         <code>readings</code> / <code>queries</code> 契约整体验证，只取 <code>readings</code>
         ），枚举六种有向顺序，逐次以当前合成序列后缀匹配下一份前缀——每道接缝至少重叠 1
         条读数且下一份至少贡献 1 条新读数；取合成长度最短者，完全并列按槽位名称 A→B→C
-        裁决，并展示最终顺序、两道接缝长度与合成预览。
+        裁决。拼接成立后可按合成半开坐标复核跨接缝窗口第 k 小值，并定位全部原始来源。
       </>
     ),
   },

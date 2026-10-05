@@ -503,3 +503,73 @@ button.ghost:hover {
   color: var(--ok);
   font-weight: 700;
 }
+
+.chain-review {
+  margin-top: 18px;
+  border-top: 1px solid var(--line);
+  padding-top: 14px;
+}
+
+.chain-review h4 {
+  margin: 0 0 6px;
+}
+
+.chain-review-disabled {
+  border-color: rgba(255, 200, 87, 0.35);
+}
+
+.review-controls {
+  display: flex;
+  gap: 10px;
+  align-items: end;
+  flex-wrap: wrap;
+  margin: 10px 0;
+}
+
+.review-controls label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.review-controls input {
+  width: 110px;
+  background: var(--panel-2);
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 7px 9px;
+  font: inherit;
+}
+
+.review-errors {
+  max-height: 120px;
+}
+
+.review-result {
+  border: 1px solid var(--line);
+  background: var(--panel-2);
+  border-radius: 8px;
+  padding: 10px 12px;
+}
+
+.source-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: 8px;
+}
+
+.source-table th,
+.source-table td {
+  border-bottom: 1px solid rgba(44, 56, 80, 0.6);
+  padding: 5px 8px;
+  text-align: left;
+}
+
+.source-table th {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+}
